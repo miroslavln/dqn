@@ -44,7 +44,7 @@ class DqnAgent(object):
 
     def _perform_action(self, action):
         reward, terminal, screen = 0, False, None
-        for i in xrange(self.history_length):
+        for i in range(self.history_length):
             if not terminal:
                 reward += self.env.act(action)
                 screen = self.env.getScreen()
@@ -69,7 +69,8 @@ class DqnAgent(object):
 
     def train(self, train_steps, epoch=0):
         logger.info("Training. Exploration rate {}".format(self._get_exploration_rate()))
-        for i in tqdm(xrange(train_steps)):
+        self._restart()
+        for i in tqdm(range(train_steps)):
             action, reward, new_state, terminal = self.step(self._get_exploration_rate())
             self.mem.add(action, reward, new_state, terminal)
 
@@ -83,7 +84,7 @@ class DqnAgent(object):
 
     def _restart(self):
         self.env.restart()
-        for i in xrange(self.history_length):
+        for i in range(self.history_length):
             reward = self.env.act(np.random.choice(self.num_actions))
             screen = self.env.getScreen()
             terminal = self.env.isTerminal()
@@ -91,7 +92,7 @@ class DqnAgent(object):
 
     def play(self, num_games):
         self._restart()
-        for i in xrange(num_games):
+        for i in range(num_games):
             terminal = False
             while not terminal:
                 action, reward, new_state, terminal = self.step(self.exploration_rate_test)
@@ -102,7 +103,7 @@ class DqnAgent(object):
             self.statistics.reset(epoch)
 
         self._restart()
-        for i in tqdm(xrange(test_steps)):
+        for i in tqdm(range(test_steps)):
             action, reward, new_state, terminal = self.step(self.exploration_rate_test)
             if self.statistics:
                 self.statistics.update(action, reward, terminal, self._get_exploration_rate())

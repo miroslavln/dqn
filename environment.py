@@ -44,7 +44,7 @@ class GymEnvironment(Environment):
     self.terminal = False
 
   def act(self, action):
-    self.obs, reward, self.terminal, _ = self.gym.step(action)
+    self.obs, reward, self.terminal, _, _ = self.gym.step(action)
     if self.display:
       self.gym.render()
     return reward

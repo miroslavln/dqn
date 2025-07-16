@@ -11,6 +11,7 @@ from replay_memory import ReplayMemory
 import random
 import argparse
 import sys
+import torch
 
 def str2bool(v):
   return v.lower() in ("yes", "true", "t", "1")
@@ -60,6 +61,7 @@ logger.setLevel(args.log_level)
 
 if args.random_seed:
   random.seed(args.random_seed)
+  torch.manual_seed(args.random_seed)
 
 # instantiate classes
 env = GymEnvironment(args.game, args)
@@ -78,7 +80,7 @@ if args.play_games:
   agent.play(args.play_games)
   sys.exit()
 
-for epoch in xrange(args.start_epoch, args.epochs):
+for epoch in range(args.start_epoch, args.epochs):
   logger.info("Epoch #{}/{}".format(epoch + 1, args.epochs))
 
   if args.train_steps:

@@ -1,7 +1,7 @@
-import tensorflow as tf
-from tensorflow.keras import layers
+import torch
+import torch.nn as nn
 
-class VisionTransformer(tf.keras.Model):
+class VisionTransformer(nn.Module):
     def __init__(self, num_actions):
         super(VisionTransformer, self).__init__()
         self.patch_size = 14
@@ -9,64 +9,49 @@ class VisionTransformer(tf.keras.Model):
         self.num_heads = 4
         self.transformer_layers = 2
         self.num_actions = num_actions
+        self.num_patches = (84 // self.patch_size) ** 2
 
-        self.data_augmentation = tf.keras.Sequential(
-            [
-                layers.experimental.preprocessing.Normalization(),
-                layers.experimental.preprocessing.Resizing(72, 72),
-                layers.experimental.preprocessing.RandomFlip("horizontal"),
-                layers.experimental.preprocessing.RandomRotation(factor=0.02),
-                layers.experimental.preprocessing.RandomZoom(
-                    height_factor=0.2, width_factor=0.2
-                ),
-            ],
-            name="data_augmentation",
+        self.projection = nn.Linear(self.patch_size * self.patch_size * 4, self.projection_dim)
+        self.positional_embedding = nn.Embedding(self.num_patches, self.projection_dim)
+        self.transformer_blocks = nn.ModuleList(
+            [self.transformer_block() for _ in range(self.transformer_layers)]
         )
-        self.projection = layers.Dense(self.projection_dim)
-        self.positional_embedding = layers.Embedding(
-            input_dim=25, output_dim=self.projection_dim
-        )
-        self.transformer_blocks = [
-            self.transformer_block() for _ in range(self.transformer_layers)
-        ]
-        self.classification_head = layers.Dense(self.num_actions)
+        self.classification_head = nn.Linear(self.projection_dim * self.num_patches, self.num_actions)
 
     def transformer_block(self):
-        return tf.keras.Sequential(
-            [
-                layers.LayerNormalization(epsilon=1e-6),
-                layers.MultiHeadAttention(
-                    num_heads=self.num_heads, key_dim=self.projection_dim, dropout=0.1
-                ),
-                layers.LayerNormalization(epsilon=1e-6),
-                layers.Dense(self.projection_dim * 2, activation=tf.nn.gelu),
-                layers.Dense(self.projection_dim),
-            ]
+        return nn.Sequential(
+            nn.LayerNorm(self.projection_dim),
+            nn.MultiheadAttention(
+                embed_dim=self.projection_dim,
+                num_heads=self.num_heads,
+                dropout=0.1,
+                batch_first=True,
+            ),
+            nn.LayerNorm(self.projection_dim),
+            nn.Linear(self.projection_dim, self.projection_dim * 2),
+            nn.GELU(),
+            nn.Linear(self.projection_dim * 2, self.projection_dim),
         )
 
-    def call(self, inputs):
-        augmented = self.data_augmentation(inputs)
-        patches = tf.image.extract_patches(
-            images=augmented,
-            sizes=[1, self.patch_size, self.patch_size, 1],
-            strides=[1, self.patch_size, self.patch_size, 1],
-            rates=[1, 1, 1, 1],
-            padding="VALID",
-        )
-        patch_dims = patches.shape[-1]
-        patches = tf.reshape(patches, [-1, (72 // self.patch_size) ** 2, patch_dims])
+    def forward(self, x):
+        x = x.permute(0, 3, 1, 2)
+        patches = x.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
+        patches = patches.contiguous().view(x.size(0), 4, -1, self.patch_size, self.patch_size)
+        patches = patches.permute(0, 2, 3, 4, 1).contiguous()
+        patches = patches.view(x.size(0), self.num_patches, -1)
 
         projected_patches = self.projection(patches)
-        positions = tf.range(start=0, limit=(72 // self.patch_size) ** 2, delta=1)
+
+        positions = torch.arange(start=0, end=self.num_patches).expand(x.size(0), -1)
         positional_embeddings = self.positional_embedding(positions)
         encoded_patches = projected_patches + positional_embeddings
 
         for transformer_block in self.transformer_blocks:
-            encoded_patches = transformer_block(encoded_patches)
+            encoded_patches, _ = transformer_block[1](encoded_patches, encoded_patches, encoded_patches)
 
-        representation = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-        representation = layers.Flatten()(representation)
-        representation = layers.Dropout(0.5)(representation)
+        representation = nn.LayerNorm(self.projection_dim)(encoded_patches)
+        representation = representation.flatten(start_dim=1)
+        representation = nn.Dropout(0.5)(representation)
 
         logits = self.classification_head(representation)
         return logits
