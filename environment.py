@@ -1,5 +1,6 @@
-import gym
+import gymnasium as gym
 import cv2
+import ale_py
 
 class Environment:
   def __init__(self):
@@ -35,7 +36,7 @@ class GymEnvironment(Environment):
     self.dims = (args.screen_width, args.screen_height)
 
   def numActions(self):
-    assert isinstance(self.gym.action_space, gym.spaces.Discrete)
+    assert isinstance(self.gym.action_space, gym.spaces.discrete.Discrete)
     return self.gym.action_space.n
 
   def restart(self):

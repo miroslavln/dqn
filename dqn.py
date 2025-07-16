@@ -3,6 +3,7 @@ import os
 import numpy as np
 import tensorflow as tf
 
+from vision_transformer import VisionTransformer
 from network_variable import WeightsVariable, BiasVariable, NetworkVariable
 
 logger = logging.getLogger()
@@ -30,45 +31,13 @@ class DeepQNetwork:
 
         self.build_graph()
 
-        self.session = tf.Session(graph=self.graph)
-        self.train_writer = tf.train.SummaryWriter('logs/train', self.session.graph)
+        self.session = tf.compat.v1.Session(graph=self.graph)
+        self.train_writer = tf.compat.v1.summary.FileWriter('logs/train', self.session.graph)
         self.session.run(self.initCmd)
-
-    def define_variables(self, variables):
-        variables['W_conv1'] = WeightsVariable([8, 8, self.history_length, 32])
-        variables['b_conv1'] = BiasVariable([32])
-
-        variables['W_conv2'] = WeightsVariable([4, 4, 32, 64])
-        variables['b_conv2'] = BiasVariable([64])
-
-        variables['W_conv3'] = WeightsVariable([3, 3, 64, 64])
-        variables['b_conv3'] = BiasVariable([64])
-
-        variables['W_fc1'] = WeightsVariable([7 * 7 * 64, 512])
-        variables['b_fc1'] = BiasVariable([512])
-
-        variables['W_fc2'] = WeightsVariable([512, self.num_actions])
-        variables['b_fc2'] = BiasVariable([self.num_actions])
 
     def create_network(self, x, model, name):
         with tf.variable_scope(name):
-            self.define_variables(model)
-            return self.define_network(model, x)
-
-    def define_network(self, model, x):
-        h_conv1 = tf.nn.conv2d(x, model['W_conv1'].get_variable(), strides=[1, 4, 4, 1], padding='VALID') + model[
-            'b_conv1'].get_variable()
-        h_relu1 = tf.nn.relu(h_conv1)
-        h_conv2 = tf.nn.conv2d(h_relu1, model['W_conv2'].get_variable(), strides=[1, 2, 2, 1], padding='VALID') + model[
-            'b_conv2'].get_variable()
-        h_relu2 = tf.nn.relu(h_conv2)
-        h_conv3 = tf.nn.conv2d(h_relu2, model['W_conv3'].get_variable(), strides=[1, 1, 1, 1], padding='VALID') + model[
-            'b_conv3'].get_variable()
-        h_relu3 = tf.nn.relu(h_conv3)
-        model[CONV_LAYER] = h_relu3
-        h_relu3_flat = tf.reshape(h_relu3, [-1, 7 * 7 * 64])
-        h_fc1 = tf.nn.relu(tf.matmul(h_relu3_flat, model['W_fc1'].get_variable()) + model['b_fc1'].get_variable())
-        return tf.matmul(h_fc1, model['W_fc2'].get_variable()) + model['b_fc2'].get_variable()
+            return VisionTransformer(self.num_actions)(x)
 
     def build_graph(self):
         with self.graph.as_default():
@@ -77,21 +46,21 @@ class DeepQNetwork:
 
             self.define_summary_operations()
 
-            self.saver = tf.train.Saver()
-            self.initCmd = tf.initialize_all_variables()
+            self.saver = tf.compat.v1.train.Saver()
+            self.initCmd = tf.compat.v1.global_variables_initializer()
 
 
     def create_models(self):
-        self.batch = tf.placeholder(dtype=tf.float32, shape=[None, 84, 84, self.history_length], name='s')
-        normalized_batch = tf.div(self.batch, 255)
+        self.batch = tf.compat.v1.placeholder(dtype=tf.float32, shape=[None, 84, 84, self.history_length], name='s')
+        normalized_batch = tf.divide(self.batch, 255)
         self.model = self.create_network(normalized_batch, self.model_network, 'pre_q')
         self.target_model = self.create_network(normalized_batch, self.target_network, 'post_q')
 
 
     def define_optimizer(self):
         with tf.variable_scope('Optimizer'):
-            self.actions = tf.placeholder(dtype=tf.int64, shape=[None], name='actions')
-            self.targets = tf.placeholder(dtype=tf.float32, shape=[None], name='targets')
+            self.actions = tf.compat.v1.placeholder(dtype=tf.int64, shape=[None], name='actions')
+            self.targets = tf.compat.v1.placeholder(dtype=tf.float32, shape=[None], name='targets')
 
             actions = tf.one_hot(self.actions, self.num_actions, 1.0, 0)
             self.q_values = tf.reduce_sum(self.model * actions, reduction_indices=1)
@@ -100,7 +69,7 @@ class DeepQNetwork:
             clipped_delta = tf.clip_by_value(delta, -self.clip_error, self.clip_error, name='clipped_delta')
 
             self.loss = tf.reduce_mean(tf.square(clipped_delta), name='loss')
-            self.optimizer = tf.train.RMSPropOptimizer(learning_rate=self.learning_rate, decay=0.95, momentum=0.95, epsilon=0.01).minimize(self.loss)
+            self.optimizer = tf.compat.v1.train.RMSPropOptimizer(learning_rate=self.learning_rate, decay=0.95, momentum=0.95, epsilon=0.01).minimize(self.loss)
 
     def define_summary_operations(self):
         with tf.variable_scope('Summary'):
@@ -109,26 +78,26 @@ class DeepQNetwork:
             self.define_image_summary()
 
     def define_training_summary(self):
-        ave_q = tf.scalar_summary('average q value', tf.reduce_mean(self.q_values))
+        ave_q = tf.compat.v1.summary.scalar('average q value', tf.reduce_mean(self.q_values))
 
         avg_q = tf.reduce_mean(self.model, 0)
-        q_summary = [tf.histogram_summary('q/{}'.format(idx), avg_q[idx]) for idx in xrange(self.num_actions)]
+        q_summary = [tf.compat.v1.summary.histogram('q/{}'.format(idx), avg_q[idx]) for idx in xrange(self.num_actions)]
 
-        self.train_summary = tf.merge_summary([ave_q]+q_summary)
+        self.train_summary = tf.compat.v1.summary.merge([ave_q]+q_summary)
 
 
     def define_epoch_summary(self):
-        self.num_games = tf.placeholder(dtype=tf.int32)
-        games_summary = tf.scalar_summary('num games/epoch', self.num_games)
+        self.num_games = tf.compat.v1.placeholder(dtype=tf.int32)
+        games_summary = tf.compat.v1.summary.scalar('num games/epoch', self.num_games)
 
-        self.average_reward = tf.placeholder(dtype=tf.float32)
-        reward_summary = tf.scalar_summary('average reward/game', self.average_reward)
+        self.average_reward = tf.compat.v1.placeholder(dtype=tf.float32)
+        reward_summary = tf.compat.v1.summary.scalar('average reward/game', self.average_reward)
 
-        self.epoch_summary = tf.merge_summary([games_summary, reward_summary])
+        self.epoch_summary = tf.compat.v1.summary.merge([games_summary, reward_summary])
 
     def define_image_summary(self):
-        batch_images = tf.image_summary("convolution image", self.model_network[CONV_LAYER][:,:,:, :1], max_images=32)
-        self.image_summary = tf.merge_summary([batch_images])
+        batch_images = tf.compat.v1.summary.image("convolution image", self.model_network[CONV_LAYER][:,:,:, :1], max_images=32)
+        self.image_summary = tf.compat.v1.summary.merge([batch_images])
 
     def assign_model_to_target(self):
         for name in self.model_network.keys():
