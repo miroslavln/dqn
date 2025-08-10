@@ -1,189 +1,176 @@
+"""PyTorch implementation of Deep Q-Network.
+
+This module replaces the original TensorFlow based implementation with a
+minimal PyTorch version.  The interface of :class:`DeepQNetwork` remains the
+same so that the rest of the project can interact with it without changes.
+
+The network architecture matches the one used in the original DQN paper:
+
+* 3 convolutional layers
+* 2 fully connected layers
+
+The class keeps two copies of the network (``model`` and ``target_model``).
+The target network is periodically synchronised with ``model`` to stabilise
+training.
+"""
+
+from __future__ import annotations
+
 import logging
-import os
+from dataclasses import dataclass
+from typing import Tuple
+
 import numpy as np
-import tensorflow as tf
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
-from network_variable import WeightsVariable, BiasVariable, NetworkVariable
 
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
-CONV_LAYER ='conv'
 
+class QNetwork(nn.Module):
+    """Small convolutional network used by :class:`DeepQNetwork`."""
+
+    def __init__(self, history_length: int, num_actions: int) -> None:
+        super(QNetwork, self).__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(history_length, 32, kernel_size=8, stride=4),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU(inplace=True),
+            nn.Flatten(),
+            nn.Linear(7 * 7 * 64, 512),
+            nn.ReLU(inplace=True),
+            nn.Linear(512, num_actions),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover - tiny wrapper
+        # Inputs are expected to be in [0, 255]; normalise to [0, 1].
+        x = x / 255.0
+        return self.net(x)
+
+
+@dataclass
 class DeepQNetwork:
-    def __init__(self, num_actions, args):
-        self.graph = tf.Graph()
-        self.num_actions = num_actions
-        self.batch_size = args.batch_size
-        self.discount_rate = args.discount_rate
-        self.history_length = args.history_length
+    """Wraps two :class:`QNetwork` instances and handles optimisation."""
 
-        self.clip_error = args.clip_error
-        self.min_reward = args.min_reward
-        self.max_reward = args.max_reward
+    num_actions: int
+    args: any
 
-        self.learning_rate = args.learning_rate
-        self.target_steps = args.target_steps
-        self.total_training_steps = args.start_epoch * args.train_steps
+    def __post_init__(self) -> None:
+        self.batch_size = self.args.batch_size
+        self.discount_rate = self.args.discount_rate
+        self.history_length = self.args.history_length
 
-        self.model_network = {}
-        self.target_network = {}
+        self.clip_error = self.args.clip_error
+        self.min_reward = self.args.min_reward
+        self.max_reward = self.args.max_reward
 
-        self.build_graph()
+        self.learning_rate = self.args.learning_rate
+        self.target_steps = self.args.target_steps
+        self.total_training_steps = self.args.start_epoch * self.args.train_steps
 
-        self.session = tf.Session(graph=self.graph)
-        self.train_writer = tf.train.SummaryWriter('logs/train', self.session.graph)
-        self.session.run(self.initCmd)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def define_variables(self, variables):
-        variables['W_conv1'] = WeightsVariable([8, 8, self.history_length, 32])
-        variables['b_conv1'] = BiasVariable([32])
+        # Create online and target networks
+        self.model = QNetwork(self.history_length, self.num_actions).to(self.device)
+        self.target_model = QNetwork(self.history_length, self.num_actions).to(self.device)
+        self.assign_model_to_target()
 
-        variables['W_conv2'] = WeightsVariable([4, 4, 32, 64])
-        variables['b_conv2'] = BiasVariable([64])
+        self.optimizer = optim.RMSprop(
+            self.model.parameters(),
+            lr=self.learning_rate,
+            alpha=0.95,
+            momentum=0.95,
+            eps=0.01,
+        )
 
-        variables['W_conv3'] = WeightsVariable([3, 3, 64, 64])
-        variables['b_conv3'] = BiasVariable([64])
+    # ------------------------------------------------------------------ helpers
+    def _prepare_state(self, state: np.ndarray) -> torch.Tensor:
+        """Convert a batch of states from numpy to a torch tensor.
 
-        variables['W_fc1'] = WeightsVariable([7 * 7 * 64, 512])
-        variables['b_fc1'] = BiasVariable([512])
+        The environment stores states in ``(batch, H, W, C)`` format while
+        PyTorch expects ``(batch, C, H, W)``.
+        """
 
-        variables['W_fc2'] = WeightsVariable([512, self.num_actions])
-        variables['b_fc2'] = BiasVariable([self.num_actions])
+        state = torch.from_numpy(np.transpose(state, (0, 3, 1, 2))).float()
+        return state.to(self.device)
 
-    def create_network(self, x, model, name):
-        with tf.variable_scope(name):
-            self.define_variables(model)
-            return self.define_network(model, x)
+    # ----------------------------------------------------------------- interface
+    def train(self, minibatch: Tuple[np.ndarray, ...], epoch: int) -> None:
+        """Performs one optimisation step using a minibatch of samples."""
 
-    def define_network(self, model, x):
-        h_conv1 = tf.nn.conv2d(x, model['W_conv1'].get_variable(), strides=[1, 4, 4, 1], padding='VALID') + model[
-            'b_conv1'].get_variable()
-        h_relu1 = tf.nn.relu(h_conv1)
-        h_conv2 = tf.nn.conv2d(h_relu1, model['W_conv2'].get_variable(), strides=[1, 2, 2, 1], padding='VALID') + model[
-            'b_conv2'].get_variable()
-        h_relu2 = tf.nn.relu(h_conv2)
-        h_conv3 = tf.nn.conv2d(h_relu2, model['W_conv3'].get_variable(), strides=[1, 1, 1, 1], padding='VALID') + model[
-            'b_conv3'].get_variable()
-        h_relu3 = tf.nn.relu(h_conv3)
-        model[CONV_LAYER] = h_relu3
-        h_relu3_flat = tf.reshape(h_relu3, [-1, 7 * 7 * 64])
-        h_fc1 = tf.nn.relu(tf.matmul(h_relu3_flat, model['W_fc1'].get_variable()) + model['b_fc1'].get_variable())
-        return tf.matmul(h_fc1, model['W_fc2'].get_variable()) + model['b_fc2'].get_variable()
-
-    def build_graph(self):
-        with self.graph.as_default():
-            self.create_models()
-            self.define_optimizer()
-
-            self.define_summary_operations()
-
-            self.saver = tf.train.Saver()
-            self.initCmd = tf.initialize_all_variables()
-
-
-    def create_models(self):
-        self.batch = tf.placeholder(dtype=tf.float32, shape=[None, 84, 84, self.history_length], name='s')
-        normalized_batch = tf.div(self.batch, 255)
-        self.model = self.create_network(normalized_batch, self.model_network, 'pre_q')
-        self.target_model = self.create_network(normalized_batch, self.target_network, 'post_q')
-
-
-    def define_optimizer(self):
-        with tf.variable_scope('Optimizer'):
-            self.actions = tf.placeholder(dtype=tf.int64, shape=[None], name='actions')
-            self.targets = tf.placeholder(dtype=tf.float32, shape=[None], name='targets')
-
-            actions = tf.one_hot(self.actions, self.num_actions, 1.0, 0)
-            self.q_values = tf.reduce_sum(self.model * actions, reduction_indices=1)
-
-            delta = self.targets - self.q_values
-            clipped_delta = tf.clip_by_value(delta, -self.clip_error, self.clip_error, name='clipped_delta')
-
-            self.loss = tf.reduce_mean(tf.square(clipped_delta), name='loss')
-            self.optimizer = tf.train.RMSPropOptimizer(learning_rate=self.learning_rate, decay=0.95, momentum=0.95, epsilon=0.01).minimize(self.loss)
-
-    def define_summary_operations(self):
-        with tf.variable_scope('Summary'):
-            self.define_epoch_summary()
-            self.define_training_summary()
-            self.define_image_summary()
-
-    def define_training_summary(self):
-        ave_q = tf.scalar_summary('average q value', tf.reduce_mean(self.q_values))
-
-        avg_q = tf.reduce_mean(self.model, 0)
-        q_summary = [tf.histogram_summary('q/{}'.format(idx), avg_q[idx]) for idx in xrange(self.num_actions)]
-
-        self.train_summary = tf.merge_summary([ave_q]+q_summary)
-
-
-    def define_epoch_summary(self):
-        self.num_games = tf.placeholder(dtype=tf.int32)
-        games_summary = tf.scalar_summary('num games/epoch', self.num_games)
-
-        self.average_reward = tf.placeholder(dtype=tf.float32)
-        reward_summary = tf.scalar_summary('average reward/game', self.average_reward)
-
-        self.epoch_summary = tf.merge_summary([games_summary, reward_summary])
-
-    def define_image_summary(self):
-        batch_images = tf.image_summary("convolution image", self.model_network[CONV_LAYER][:,:,:, :1], max_images=32)
-        self.image_summary = tf.merge_summary([batch_images])
-
-    def assign_model_to_target(self):
-        for name in self.model_network.keys():
-            if not isinstance(self.target_network[name], NetworkVariable):
-                continue
-            self.target_network[name].assign(self.model_network[name], session=self.session)
-
-    def save_weights(self, file_name):
-        save_path = self.saver.save(self.session, file_name)
-        logger.info("Model saved in file: %s" % save_path)
-
-    def load_weights(self, file_name):
-        logger.info("Loading models saved in file: %s" % file_name)
-        self.saver.restore(self.session, file_name)
-
-    def train(self, minibatch, epoch):
         s, actions, rewards, s_prime, terminals = minibatch
 
-        postq = self.get_q_values(s_prime, self.target_model)
-        max_postq = np.max(postq, axis=1)
+        state = self._prepare_state(s)
+        next_state = self._prepare_state(s_prime)
+        actions = torch.from_numpy(actions).long().to(self.device)
+        rewards = torch.from_numpy(np.clip(rewards, self.min_reward, self.max_reward)).float().to(self.device)
+        terminals = torch.from_numpy(terminals.astype(np.float32)).to(self.device)
 
-        rewards = np.clip(rewards, self.min_reward, self.max_reward)
+        with torch.no_grad():
+            next_q = self.target_model(next_state).max(1)[0]
+            target = rewards + (1.0 - terminals) * (self.discount_rate * next_q)
 
-        '''
-        for i, action in enumerate(actions):
-            if terminals[i]:
-                target[i, action] = float(rewards[i])
-            else:
-                target[i, action] = float(rewards[i]) + self.discount_rate * max_postq[i]
-        '''
-        target = rewards + (1.0 - terminals) * (self.discount_rate * max_postq)
+        q_values = self.model(state)
+        q_selected = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
 
-        feed_dict = {self.batch: s, self.actions: actions, self.targets: target}
-        _, train_summaryStr, image_summaryStr  = self.session.run([self.optimizer, self.train_summary, self.image_summary], feed_dict=feed_dict)
-        self.train_writer.add_summary(train_summaryStr, self.total_training_steps)
+        delta = target - q_selected
+        clipped_delta = torch.clamp(delta, -self.clip_error, self.clip_error)
+        loss = (clipped_delta ** 2).mean()
 
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        self.total_training_steps += 1
         if self.total_training_steps % self.target_steps == 0:
             self.assign_model_to_target()
 
-        self.total_training_steps += 1
+    # ---------------------------------------------------------------- prediction
+    def get_q_values(self, state: np.ndarray, model: nn.Module | None = None) -> np.ndarray:
+        """Returns Q-values for ``state`` using ``model`` (or ``self.model``)."""
 
-    def get_q_values(self, state, model):
-        feed_dict = {self.batch: state}
+        model = model or self.model
+        with torch.no_grad():
+            tensor_state = self._prepare_state(state)
+            q = model(tensor_state).cpu().numpy()
+        return q
 
-        return self.session.run(model, feed_dict=feed_dict)
-
-    def predict(self, state):
+    def predict(self, state: np.ndarray) -> np.ndarray:
         return self.get_q_values(state, self.model)
 
-    def add_statistics(self, epoch, num_games, average_reward):
-        epoch_summary_str = self.epoch_summary.eval(session=self.session, feed_dict={
-            self.num_games: num_games,
-            self.average_reward: average_reward})
+    # ---------------------------------------------------------------- maintenance
+    def assign_model_to_target(self) -> None:
+        """Copies parameters from the online network to the target network."""
 
-        self.train_writer.add_summary(epoch_summary_str, epoch)
-        self.train_writer.flush()
+        self.target_model.load_state_dict(self.model.state_dict())
 
+    def save_weights(self, file_name: str) -> None:
+        torch.save(self.model.state_dict(), file_name)
+        logger.info("Model saved in file: %s", file_name)
+
+    def load_weights(self, file_name: str) -> None:
+        logger.info("Loading models saved in file: %s", file_name)
+        state_dict = torch.load(file_name, map_location=self.device)
+        self.model.load_state_dict(state_dict)
+        self.assign_model_to_target()
+
+    # ---------------------------------------------------------------- statistics
+    def add_statistics(self, epoch: int, num_games: int, average_reward: float) -> None:  # noqa: D401 - part of public API
+        """Compatibility stub used by :class:`statistics.Statistics`.
+
+        TensorFlow implementation logged data to TensorBoard; for the PyTorch
+        port we currently do not log anything, but keeping the method preserves
+        the public API.
+        """
+
+        # Intentionally left blank – no logging implementation.
+        return None
+
+
+__all__ = ["DeepQNetwork"]
 

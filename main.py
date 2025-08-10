@@ -78,7 +78,7 @@ if args.play_games:
   agent.play(args.play_games)
   sys.exit()
 
-for epoch in xrange(args.start_epoch, args.epochs):
+for epoch in range(args.start_epoch, args.epochs):
   logger.info("Epoch #{}/{}".format(epoch + 1, args.epochs))
 
   if args.train_steps:
