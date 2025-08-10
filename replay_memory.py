@@ -1,7 +1,5 @@
 import logging
 import numpy as np
-import random
-
 logger = logging.getLogger()
 
 class ReplayMemory:
@@ -9,9 +7,14 @@ class ReplayMemory:
         self.size = size
         # preallocate memory
         self.actions = np.empty(self.size, dtype=np.uint8)
-        self.rewards = np.empty(self.size, dtype=np.integer)
-        self.states = np.empty((self.size, args.screen_height, args.screen_width, args.history_length), dtype=np.uint8)
-        self.terminals = np.empty(self.size, dtype=np.bool)
+        # use float32 to accommodate non-integer rewards and avoid deprecated numpy types
+        self.rewards = np.empty(self.size, dtype=np.float32)
+        self.states = np.empty(
+            (self.size, args.screen_height, args.screen_width, args.history_length),
+            dtype=np.uint8,
+        )
+        # numpy removed np.bool alias; using builtin bool keeps compatibility
+        self.terminals = np.empty(self.size, dtype=bool)
         self.history_length = args.history_length
         self.state_shape = (args.screen_height, args.screen_width, args.history_length)
         self.batch_size = args.batch_size
@@ -32,13 +35,14 @@ class ReplayMemory:
 
     def getMinibatch(self):
         assert self.count > self.history_length
-        non_terminals = np.where(self.terminals[:self.count] < 1)[0]
+        non_terminals = np.where(self.terminals[: self.count] < 1)[0]
         indexes = np.random.choice(non_terminals, self.batch_size)
 
         poststate_indexes = (indexes + 1) % self.size
-        actions = self.actions[poststate_indexes]
-        rewards = self.rewards[poststate_indexes]
-        terminals = self.terminals[poststate_indexes]
+        # actions, rewards and terminals correspond to the sampled indexes
+        actions = self.actions[indexes]
+        rewards = self.rewards[indexes]
+        terminals = self.terminals[indexes]
         prestates = self.states[indexes]
         poststates = self.states[poststate_indexes]
 
